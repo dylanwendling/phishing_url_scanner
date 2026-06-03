@@ -1,0 +1,1066 @@
+' ============================================================
+' CONTROLS — add in VBA Designer (exact names required):
+'
+'   lblTitle    : Label         Caption = "URL Threat Scanner"    Bold = True
+'   lblURL      : Label         Caption = "URL :"                 Bold = True
+'   txtURL      : TextBox       (URL input)
+'   lblModel    : Label         Caption = "Model :"               Bold = True
+'   cboModel    : ComboBox      (model selector)
+'   lblResult   : Label         Caption = "Result :"             Bold = True
+'   txtResult   : TextBox       Locked = True,  TabStop = False
+'   lblScore    : Label         Caption = "Score :"              Bold = True
+'   txtScore    : TextBox       Locked = True,  TabStop = False
+'   lblDetail   : Label         Caption = "Details :"            Bold = True
+'   txtDetail   : TextBox       Locked = True,  TabStop = False  MultiLine = True
+'   btnScan     : CommandButton Caption = "Scan"         ForeColor = &H00008000
+'   btnScanDB   : CommandButton Caption = "Scan from DB" ForeColor = &H00800080
+'   btnCancel   : CommandButton Caption = "Cancel"       ForeColor = &H000000FF
+'   btnBlacklist: CommandButton Caption = "My Blacklist"
+' ============================================================
+
+' ============================================================
+' UserForm1 - URL Threat Scanner
+' ============================================================
+Option Explicit
+
+Private Const DB_SHEET As String = "Database"
+Private Const BLACKLIST_SHEET As String = "Blacklist"
+
+' Column indices in the Database sheet
+Private Const COL_URL     As Integer = 1  ' A
+Private Const COL_DOM     As Integer = 2  ' B
+Private Const COL_HTTPS   As Integer = 3  ' C
+Private Const COL_LABEL   As Integer = 4  ' D
+
+' ============================================================
+' FORM INITIALISE
+' ============================================================
+Private Sub UserForm_Initialize()
+    Dim ws As Worksheet
+    
+    ' DISABLED: EnsureBlacklistSheet ws
+    ' (This prevents the blacklist from auto-generating before the button is clicked)
+
+    With cboModel
+        .Clear
+        .AddItem "VirusTotal API"
+        .AddItem "Logistic Regression"
+        .AddItem "Heuristic (Built-in)"
+        .AddItem "Keyword Blacklist"
+        .AddItem "Database Lookup"
+        .ListIndex = 0          ' Changed default to VirusTotal API
+    End With
+    txtResult.Text = ""
+    txtScore.Text = ""
+    txtResult.ForeColor = RGB(0, 0, 0)
+    
+    On Error Resume Next
+    If TypeName(Me.Controls("txtDetail")) = "TextBox" Then
+        Me.Controls("txtDetail").Text = ""
+    End If
+    On Error GoTo 0
+End Sub
+
+' ============================================================
+' SCAN BUTTON — manual URL entry
+' ============================================================
+Private Sub btnScan_Click()
+    Dim sURL    As String
+    Dim sModel  As String
+    Dim dScore  As Double
+    Dim sClass  As String
+    Dim sAction As String
+    Dim sDetail As String
+
+    sURL = Trim(txtURL.Text)
+    sModel = cboModel.Value
+
+    If sURL = "" Then
+        MsgBox "Please enter a URL before scanning.", vbExclamation, "Input Required"
+        txtURL.SetFocus: Exit Sub
+    End If
+    If Not IsValidURL(sURL) Then
+        MsgBox "Please enter a valid URL beginning with http:// or https://", _
+               vbExclamation, "Invalid URL"
+        txtURL.SetFocus: Exit Sub
+    End If
+
+    txtResult.Text = "Scanning..."
+    txtResult.ForeColor = RGB(100, 100, 100)
+    txtScore.Text = "": Me.Repaint
+    
+    Dim myAPIKey As String
+    myAPIKey = "0d455c72016196b0a1ead5a7ef53d85b06a41803a0ebd2de11b448cc07dcbd46"
+
+    On Error GoTo ScanError
+    Select Case sModel
+        Case "VirusTotal API"
+            dScore = ScoreVirusTotal(sURL, myAPIKey, sDetail)
+        Case "Logistic Regression"
+            dScore = ScoreLogisticRegression(sURL, sDetail)
+        Case "Keyword Blacklist"
+            dScore = ScoreKeywordBlacklist(sURL, sDetail)
+        Case "Database Lookup"
+            dScore = ScoreDatabaseLookup(sURL, sClass, sDetail)
+        Case Else
+            dScore = ScoreHeuristic(sURL, sDetail)
+    End Select
+    On Error GoTo 0
+
+    If sClass = "" Then ApplyThreshold dScore, sClass, sAction
+    If sAction = "" Then
+        If sClass = "PHISHING (DB)" Then
+            sAction = "CRITICAL RISK: Confirmed phishing URL in database. Clicking this link may result in severe data theft or device compromise. DO NOT VISIT."
+        ElseIf sClass = "LEGIT (DB)" Then
+            sAction = "Confirmed legitimate URL in database. Proceed with normal caution."
+        End If
+    End If
+
+    DisplayResult dScore, sClass, sAction, sDetail
+    LogResult sURL, sModel, dScore, sClass, sAction
+    Exit Sub
+
+ScanError:
+    txtResult.Text = "ERROR"
+    txtResult.ForeColor = RGB(200, 0, 0)
+    txtScore.Text = "Scan failed: " & Err.Description
+End Sub
+
+' ============================================================
+' SCAN FROM DB BUTTON (Random URL Fetcher)
+' ============================================================
+Private Sub btnScanDB_Click()
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim randomRow As Long
+    Dim sURL As String
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(DB_SHEET)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        MsgBox "Cannot find the '" & DB_SHEET & "' sheet.", vbExclamation, "Database Not Found"
+        Exit Sub
+    End If
+
+    lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
+    If lastRow < 2 Then
+        MsgBox "Database appears to be empty.", vbInformation, "Empty Database"
+        Exit Sub
+    End If
+
+    ' Pick a random row between row 2 and the last row
+    Randomize
+    randomRow = Int((lastRow - 2 + 1) * Rnd + 2)
+
+    ' Get the URL from that random row
+    sURL = Trim(ws.Cells(randomRow, COL_URL).Value)
+
+    ' Insert it into the URL textbox
+    txtURL.Text = sURL
+    
+    ' Clear out any previous scan results so it looks fresh
+    txtResult.Text = ""
+    txtScore.Text = ""
+    txtResult.ForeColor = RGB(0, 0, 0)
+    
+    On Error Resume Next
+    If TypeName(Me.Controls("txtDetail")) = "TextBox" Then
+        Me.Controls("txtDetail").Text = ""
+    End If
+    On Error GoTo 0
+
+    Me.Repaint
+End Sub
+
+' ============================================================
+' MY BLACKLIST BUTTON
+' ============================================================
+Private Sub btnBlacklist_Click()
+    Dim ws As Worksheet
+    EnsureBlacklistSheet ws
+    ws.Visible = xlSheetVisible
+    ws.Activate
+    MsgBox "Add suspicious words to Column A." & vbCrLf & _
+           "The scanner automatically checks anywhere in the URL. For example, if you add 'paypal', it will catch 'http://update-paypal-now.com'.", _
+           vbInformation, "My Blacklist"
+End Sub
+
+Private Sub btnCancel_Click()
+    Unload Me
+End Sub
+
+' ============================================================
+' THRESHOLD + DISPLAY HELPERS
+' ============================================================
+Private Sub ApplyThreshold(dScore As Double, ByRef sClass As String, ByRef sAction As String)
+    If dScore < 0.25 Then
+        sClass = "SAFE"
+        sAction = "No immediate threats found. URL appears structurally sound, but always remain vigilant."
+    ElseIf dScore <= 0.5 Then
+        sClass = "SUSPICIOUS"
+        sAction = "WARNING: Multiple suspicious indicators found. Think twice before entering passwords or personal info."
+    ElseIf dScore <= 0.8 Then
+        sClass = "MALICIOUS"
+        sAction = "DANGER: High probability of phishing or malware. Clicking this link could compromise your security. DO NOT VISIT."
+    Else
+        sClass = "CRITICAL THREAT"
+        sAction = "CRITICAL RISK: Confirmed malicious indicators. Visiting this site will likely lead to identity theft, ransomware, or financial loss. BLOCK AND REPORT."
+    End If
+End Sub
+
+Private Sub DisplayResult(dScore As Double, sClass As String, sAction As String, sDetail As String)
+    txtResult.Text = sClass
+    txtScore.Text = "Score: " & Format(dScore, "0.000") & vbCrLf & sAction
+    On Error Resume Next
+    If TypeName(Me.Controls("txtDetail")) = "TextBox" Then
+        Me.Controls("txtDetail").Text = sDetail
+    End If
+    On Error GoTo 0
+    Select Case sClass
+        Case "SAFE":                  txtResult.ForeColor = RGB(0, 150, 0)
+        Case "SUSPICIOUS":            txtResult.ForeColor = RGB(180, 100, 0)
+        Case "LEGIT (DB)":            txtResult.ForeColor = RGB(0, 150, 0)
+        Case "PHISHING (DB)":         txtResult.ForeColor = RGB(200, 0, 0)
+        Case "CRITICAL THREAT":       txtResult.ForeColor = RGB(255, 0, 0)
+        Case Else:                    txtResult.ForeColor = RGB(200, 0, 0)
+    End Select
+End Sub
+
+' ============================================================
+' MODEL 1 — Logistic Regression (Boosted Sensitivity)
+' ============================================================
+Private Function ScoreLogisticRegression(sURL As String, ByRef sDetail As String) As Double
+    Dim fLen As Double, fDashes As Double, fDots As Double
+    Dim fAt  As Double, fIP    As Double, fHTTPS As Double
+    Dim fSub As Double, fDig   As Double, fDepth As Double
+    Dim fQuery As Double
+
+    Dim host As String
+    host = ExtractHostname(sURL)
+
+    fLen = Len(sURL) / 100#
+    fDashes = (Len(sURL) - Len(Replace(sURL, "-", ""))) / 5#
+    fDots = (Len(host) - Len(Replace(host, ".", ""))) / 3#
+    fAt = (Len(sURL) - Len(Replace(sURL, "@", ""))) * 5
+    fIP = IIf(IsIPAddress(host), 5, 0)
+    fHTTPS = IIf(LCase(Left(sURL, 8)) = "https://", 0, 2)
+    fSub = CountSubDomains(host) / 2#
+    fDig = DigitRatio(host) * 3
+    
+    Dim parts() As String
+    parts = Split(sURL, "/")
+    fDepth = IIf(UBound(parts) > 2, (UBound(parts) - 2) / 3#, 0)
+    
+    Dim qPos As Long
+    qPos = InStr(sURL, "?")
+    fQuery = IIf(qPos > 0, Len(sURL) - qPos, 0) / 30#
+
+    Dim z As Double
+    z = -3# + (0.5 * fLen) + (1.2 * fDashes) + (0.8 * fDots) + (1.5 * fAt) + _
+        (2# * fIP) + (1# * fHTTPS) + (1.5 * fSub) + (1.2 * fDig) + _
+        (0.6 * fDepth) + (0.4 * fQuery)
+
+    ScoreLogisticRegression = 1# / (1# + Exp(-z))
+    
+    sDetail = "Statistical model breakdown:" & vbCrLf
+    If fIP > 0 Then sDetail = sDetail & "-> CRITICAL: Using an IP instead of a domain hides the attacker's true identity." & vbCrLf
+    If fAt > 0 Then sDetail = sDetail & "-> DANGER: URL contains an '@' symbol, a common trick to hijack authentication and obscure the real destination." & vbCrLf
+    If fHTTPS > 0 Then sDetail = sDetail & "-> WARNING: Lacks HTTPS. Data sent here can be intercepted in plain text." & vbCrLf
+    If fSub > 1 Then sDetail = sDetail & "-> SUSPICIOUS: Deep subdomains are often used by scammers to look legitimate (e.g., login.paypal.com.scam.net)." & vbCrLf
+    If fLen > 0.8 Then sDetail = sDetail & "-> SUSPICIOUS: Abnormally long URL designed to hide the actual domain name on mobile devices." & vbCrLf
+    
+    If ScoreLogisticRegression < 0.3 Then
+        sDetail = sDetail & vbCrLf & "Conclusion: URL structure appears mathematically normal."
+    ElseIf ScoreLogisticRegression > 0.7 Then
+        sDetail = sDetail & vbCrLf & "Conclusion: Mathematical structure highly indicates malicious intent."
+    End If
+End Function
+
+' ============================================================
+' MODEL 2 — Heuristic (Aggressive Scoring & Severe Warnings)
+' ============================================================
+Private Function ScoreHeuristic(sURL As String, ByRef sDetail As String) As Double
+    Dim score As Double
+    Dim host  As String
+    Dim reasons As String
+    score = 0
+    host = LCase(ExtractHostname(sURL))
+    reasons = ""
+
+    If LCase(Left(sURL, 8)) <> "https://" Then
+        score = score + 0.35
+        reasons = reasons & "[!] No HTTPS: Connection is completely unencrypted. Passwords can be stolen easily." & vbCrLf
+    End If
+    If InStr(sURL, "@") > 0 Then
+        score = score + 0.85
+        reasons = reasons & "[!!!] Basic Auth Hijack: The '@' symbol redirects you entirely away from what you think you are clicking." & vbCrLf
+    End If
+    If IsIPAddress(host) Then
+        score = score + 0.9
+        reasons = reasons & "[!!!] Direct IP Used: Legitimate companies use names (google.com). IPs are used by hackers to avoid domain blocklists." & vbCrLf
+    End If
+    If CountSubDomains(host) >= 3 Then
+        score = score + 0.6
+        reasons = reasons & "[!] Domain Spoofing: Excessive subdomains detected. This is a classic tactic to fake a trusted brand name." & vbCrLf
+    End If
+    
+    Select Case GetTLD(host)
+        Case ".ru", ".tk", ".pw", ".xyz", ".top", ".click", ".zip", ".cc", ".su"
+            score = score + 0.75
+            reasons = reasons & "[!!] High-Risk Extension: Hosted on a heavily abused TLD ('" & GetTLD(host) & "') notoriously used by cybercriminals." & vbCrLf
+    End Select
+
+    Dim pathStr As String
+    pathStr = LCase(Replace(sURL, host, ""))
+    
+    If InStr(pathStr, ".exe") > 0 Or InStr(pathStr, ".apk") > 0 Or InStr(pathStr, ".scr") > 0 Then
+        score = score + 0.95
+        reasons = reasons & "[!!!] MALWARE DOWNLOAD: URL points directly to an executable program. Clicking this WILL infect your computer with ransomware or spyware." & vbCrLf
+    End If
+
+    Dim kw As Variant
+    For Each kw In Array("login", "signin", "verify", "secure", "paypal", "microsoft", "update", "account")
+        If InStr(pathStr, kw) > 0 Then
+            score = score + 0.45
+            reasons = reasons & "[!!] Social Engineering: URL uses urgent words ('" & kw & "') in the path to panic you into logging in." & vbCrLf
+        End If
+    Next kw
+
+    If reasons = "" Then reasons = "No overt heuristic red flags detected. Still exercise caution."
+    sDetail = reasons
+    ScoreHeuristic = IIf(score > 1, 1, score)
+End Function
+
+' ============================================================
+' MODEL 3 — Keyword Blacklist (Robust Substring Matching)
+' ============================================================
+' FIX: Always scan using Cells().End(xlUp) row count so EVERY
+' row in column A is read — rows added below an Excel Table
+' are outside DataBodyRange and were being silently skipped.
+' ============================================================
+Private Function ScoreKeywordBlacklist(sURL As String, ByRef sDetail As String) As Double
+    Dim score    As Double
+    Dim reasons  As String
+    Dim ws       As Worksheet
+    Dim lastRow  As Long
+    Dim i        As Long
+    Dim rawWord  As String
+    Dim cleanWord As String
+
+    ' Normalise the URL: lowercase, strip spaces and hyphens
+    Dim cleanURL As String
+    cleanURL = LCase(Replace(Replace(sURL, " ", ""), "-", ""))
+
+    score = 0.05
+    reasons = ""
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(BLACKLIST_SHEET)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        ScoreKeywordBlacklist = 0
+        sDetail = "Blacklist sheet not found."
+        Exit Function
+    End If
+
+    ' Always use raw row count — never rely on a Table's DataBodyRange
+    lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
+
+    For i = 2 To lastRow   ' row 1 is the header
+        rawWord = Trim(CStr(ws.Cells(i, 1).Value))
+
+        ' Normalise the blacklist word the same way as the URL
+        cleanWord = LCase(Replace(Replace(rawWord, " ", ""), "-", ""))
+
+        If cleanWord <> "" And Len(cleanWord) >= 2 Then
+            If InStr(1, cleanURL, cleanWord) > 0 Then
+                score = score + 0.85
+                reasons = reasons & "[!!!] BLACKLIST HIT: The term '" & rawWord & "' was found hidden in this URL." & vbCrLf
+                reasons = reasons & "      -> Scammers inject trusted brand names into fake URLs to establish false trust." & vbCrLf
+                reasons = reasons & "      -> If you enter credentials here, they will be stolen." & vbCrLf & vbCrLf
+            End If
+        End If
+    Next i
+
+    If reasons = "" Then reasons = "No Blacklist words detected."
+    sDetail = reasons
+    ScoreKeywordBlacklist = IIf(score > 1, 1, score)
+End Function
+
+' ============================================================
+' MODEL 4 — Database Lookup (Domain Token Similarity Engine)
+' ============================================================
+' How it works:
+'
+'   Step 1 — EXACT MATCH
+'     If normURL = dbURL exactly, exit immediately with full
+'     confidence (score 1.0 phishing / 0.05 legit).
+'
+'   Step 2 — DOMAIN TOKEN SIMILARITY
+'     The scanned URL's hostname is split into meaningful word
+'     tokens by breaking on hyphens, dots, and digit runs.
+'     e.g. "paypal-security-update.com"
+'          -> tokens: paypal, security, update, com
+'
+'     Every DB row's hostname is tokenized the same way.
+'     Tokens that are generic noise (www, http, https, com,
+'     net, org, co, uk) are ignored so only meaningful words
+'     like brand names and action words drive the score.
+'
+'     For each DB row we calculate:
+'       overlap  = number of tokens shared between input and DB
+'       inputSig = number of significant tokens in input domain
+'       similarity = overlap / inputSig   (0.0 – 1.0)
+'
+'     Only rows with similarity >= MIN_SIMILARITY (0.40) are
+'     counted.  Matching rows are bucketed by label:
+'       phishMatches / phishScore  — label = 1
+'       legitMatches / legitScore  — label = 0
+'
+'     The top 3 most-similar phishing hits and top 1 legit hit
+'     are reported in detail so the user can see WHY it fired.
+'
+'   Final score:
+'     If any phishing rows matched:
+'       score = weightedPhishScore / totalMatchCount
+'       boosted by total overlap count so more DB evidence = higher score
+'     If only legit rows matched:
+'       score = 0.05  (low risk)
+'     If nothing matched at MIN_SIMILARITY:
+'       score = 0.0  and sDetail reports "no similar URLs found"
+'       (no heuristic fallback — DB result stands on its own)
+' ============================================================
+Private Function ScoreDatabaseLookup(sURL As String, ByRef sClass As String, ByRef sDetail As String) As Double
+    Dim ws      As Worksheet
+    Dim lastRow As Long
+    Dim i       As Long
+
+    Const MIN_SIMILARITY As Double = 0.4   ' minimum token overlap to count as a match
+
+    ' Normalise input URL: lowercase, strip trailing slash
+    Dim normURL As String
+    normURL = LCase(Trim(sURL))
+    If Right(normURL, 1) = "/" Then normURL = Left(normURL, Len(normURL) - 1)
+
+    ' Extract and tokenize the INPUT hostname
+    Dim inputHost As String
+    inputHost = ExtractHostname(normURL)
+    
+    Dim inputTokens() As String
+    Dim inputTokenCount As Long
+    TokenizeDomain inputHost, inputTokens, inputTokenCount
+
+    sClass = ""
+    sDetail = ""
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(DB_SHEET)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        sDetail = "Database sheet not found."
+        ScoreDatabaseLookup = 0
+        Exit Function
+    End If
+
+    lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row
+    If lastRow < 2 Then
+        sDetail = "Database is empty."
+        ScoreDatabaseLookup = 0
+        Exit Function
+    End If
+
+    ' If input has no significant tokens we cannot do similarity — return 0
+    If inputTokenCount = 0 Then
+        sDetail = "Could not extract meaningful tokens from URL hostname."
+        ScoreDatabaseLookup = 0
+        Exit Function
+    End If
+
+    ' -- Variables declared outside loop -------------------------
+    Dim dbURL        As String
+    Dim dbHost       As String
+    Dim dbLabel      As Integer
+    Dim dbTokens()   As String
+    Dim dbTokenCount As Long
+    Dim overlap      As Long
+    Dim similarity   As Double
+
+    ' Accumulators for scoring
+    Dim phishMatchCount  As Long
+    Dim legitMatchCount  As Long
+    Dim phishScoreSum    As Double
+    Dim legitScoreSum    As Double
+    phishMatchCount = 0: legitMatchCount = 0
+    phishScoreSum = 0:   legitScoreSum = 0
+
+    ' Store top 3 phishing hits and top 1 legit hit for the detail report
+    Dim topPhishURL(1 To 3)  As String
+    Dim topPhishSim(1 To 3)  As Double
+    Dim topPhishTokens(1 To 3) As String
+    Dim topLegitURL          As String
+    Dim topLegitSim          As Double
+    Dim p As Long
+    For p = 1 To 3
+        topPhishURL(p) = "": topPhishSim(p) = 0: topPhishTokens(p) = ""
+    Next p
+
+    For i = 2 To lastRow
+
+        dbURL = LCase(Trim(CStr(ws.Cells(i, COL_URL).Value)))
+        If Right(dbURL, 1) = "/" Then dbURL = Left(dbURL, Len(dbURL) - 1)
+        If dbURL = "" Then GoTo NextRow
+
+        If IsNumeric(ws.Cells(i, COL_LABEL).Value) Then
+            dbLabel = CInt(ws.Cells(i, COL_LABEL).Value)
+        Else
+            dbLabel = 0
+        End If
+
+        ' -- EXACT MATCH — exit immediately --------------------------
+        If dbURL = normURL Then
+            If dbLabel = 1 Then
+                sClass = "PHISHING (DB)"
+                sDetail = "[!!!] EXACT DATABASE MATCH (row " & i & "): This exact URL is confirmed phishing." & vbCrLf & _
+                          "      -> IT IS ACTIVELY STEALING DATA. DO NOT VISIT." & vbCrLf & _
+                          "      -> Matched: " & dbURL
+                ScoreDatabaseLookup = 1#
+            Else
+                sClass = "LEGIT (DB)"
+                sDetail = "[OK] EXACT DATABASE MATCH (row " & i & "): URL is labelled LEGITIMATE." & vbCrLf & _
+                          "      -> Matched: " & dbURL
+                ScoreDatabaseLookup = 0.05
+            End If
+            Exit Function
+        End If
+
+        ' -- DOMAIN TOKEN SIMILARITY ----------------------------------
+        dbHost = ExtractHostname(dbURL)
+        TokenizeDomain dbHost, dbTokens, dbTokenCount
+        If dbTokenCount = 0 Then GoTo NextRow
+
+        ' Count how many of the input's tokens appear in this DB domain
+        overlap = CountTokenOverlap(inputTokens, inputTokenCount, dbTokens, dbTokenCount)
+        similarity = overlap / CDbl(inputTokenCount)
+
+        If similarity >= MIN_SIMILARITY Then
+            If dbLabel = 1 Then
+                phishMatchCount = phishMatchCount + 1
+                phishScoreSum = phishScoreSum + similarity
+
+                ' Keep top 3 phishing hits sorted by similarity descending
+                Dim sharedStr As String
+                sharedStr = BuildSharedTokenString(inputTokens, inputTokenCount, dbTokens, dbTokenCount)
+                Dim slot As Long
+                For slot = 1 To 3
+                    If similarity > topPhishSim(slot) Then
+                        ' Shift lower entries down
+                        Dim s2 As Long
+                        For s2 = 3 To slot + 1 Step -1
+                            topPhishURL(s2) = topPhishURL(s2 - 1)
+                            topPhishSim(s2) = topPhishSim(s2 - 1)
+                            topPhishTokens(s2) = topPhishTokens(s2 - 1)
+                        Next s2
+                        topPhishURL(slot) = dbURL
+                        topPhishSim(slot) = similarity
+                        topPhishTokens(slot) = sharedStr
+                        Exit For
+                    End If
+                Next slot
+            Else
+                legitMatchCount = legitMatchCount + 1
+                legitScoreSum = legitScoreSum + similarity
+                If similarity > topLegitSim Then
+                    topLegitURL = dbURL
+                    topLegitSim = similarity
+                End If
+            End If
+        End If
+
+NextRow:
+    Next i
+
+    ' -- BUILD SCORE AND DETAIL REPORT -------------------------------
+    Dim totalMatches As Long
+    totalMatches = phishMatchCount + legitMatchCount
+
+    If totalMatches = 0 Then
+        sDetail = "No similar URLs found in the threat database." & vbCrLf & _
+                  "      -> Scanned domain tokens: " & JoinTokens(inputTokens, inputTokenCount)
+        ScoreDatabaseLookup = 0
+        Exit Function
+    End If
+
+    Dim reasons As String
+    reasons = ""
+
+    If phishMatchCount > 0 Then
+        ' Weighted average similarity across all phishing hits,
+        ' boosted slightly when multiple DB entries corroborate the finding
+        Dim baseScore As Double
+        baseScore = phishScoreSum / phishMatchCount
+        ' Confidence boost: up to +0.15 for 5+ corroborating rows
+        Dim boost As Double
+        boost = IIf(phishMatchCount >= 5, 0.15, phishMatchCount * 0.03)
+        Dim finalScore As Double
+        finalScore = baseScore + boost
+        If finalScore > 1 Then finalScore = 1
+
+        reasons = "[!!] DOMAIN SIMILARITY ANALYSIS: " & phishMatchCount & _
+                  " phishing URL(s) in the database share key tokens with this domain." & vbCrLf
+        reasons = reasons & "      -> Input domain tokens: " & JoinTokens(inputTokens, inputTokenCount) & vbCrLf
+        reasons = reasons & "      -> Similarity score: " & Format(baseScore, "0%") & _
+                  " (confidence boost for " & phishMatchCount & " matching DB entries: +" & Format(boost, "0%") & ")" & vbCrLf & vbCrLf
+
+        Dim t As Long
+        For t = 1 To 3
+            If topPhishURL(t) <> "" Then
+                reasons = reasons & "   [" & t & "] PHISHING DB ENTRY (" & Format(topPhishSim(t), "0%") & " similar): " & topPhishURL(t) & vbCrLf
+                reasons = reasons & "       Shared tokens: " & topPhishTokens(t) & vbCrLf
+            End If
+        Next t
+
+        If legitMatchCount > 0 Then
+            reasons = reasons & vbCrLf & "   [NOTE] " & legitMatchCount & _
+                      " legitimate URL(s) also share tokens — phishing signal dominates." & vbCrLf
+        End If
+
+        sDetail = reasons
+        ScoreDatabaseLookup = finalScore
+
+    Else
+        ' Only legit matches
+        sDetail = "[OK] DOMAIN SIMILARITY: " & legitMatchCount & _
+                  " legitimate URL(s) in the database share tokens with this domain." & vbCrLf & _
+                  "      -> Best legit match (" & Format(topLegitSim, "0%") & " similar): " & topLegitURL & vbCrLf & _
+                  "      -> Input tokens: " & JoinTokens(inputTokens, inputTokenCount)
+        ScoreDatabaseLookup = 0.05
+    End If
+
+End Function
+
+' ============================================================
+' TOKENIZE DOMAIN
+' Splits a hostname into meaningful word tokens by breaking on
+' hyphens, dots, and runs of digits.  Ignores noise words that
+' appear in almost every URL and carry no threat signal.
+' e.g. "paypal-security-update.com" -> [paypal, security, update]
+'      "login.microsoft.com"        -> [login, microsoft]
+' ============================================================
+Private Sub TokenizeDomain(sHost As String, ByRef tokens() As String, ByRef count As Long)
+    ' Noise words that appear in nearly every URL — excluded from scoring
+    Dim noise As String
+    noise = "|www|http|https|com|net|org|co|uk|de|fr|ru|info|biz|io|"
+
+    ' Replace dots and digits with hyphens to get a single split string
+    Dim s As String
+    s = LCase(sHost)
+
+    ' Replace dots with hyphens
+    s = Replace(s, ".", "-")
+
+    ' Replace digit runs with hyphens (digits alone are not meaningful tokens)
+    Dim result As String
+    result = ""
+    Dim c As String
+    Dim j As Long
+    For j = 1 To Len(s)
+        c = Mid(s, j, 1)
+        If c >= "0" And c <= "9" Then
+            result = result & "-"
+        Else
+            result = result & c
+        End If
+    Next j
+    s = result
+
+    ' Split on hyphens
+    Dim raw() As String
+    raw = Split(s, "-")
+
+    ' Filter: remove noise words and tokens shorter than 3 characters
+    ReDim tokens(0 To UBound(raw))
+    count = 0
+    Dim word As String
+    Dim idx As Long
+    For idx = 0 To UBound(raw)
+        word = Trim(raw(idx))
+        If Len(word) >= 3 Then
+            If InStr(noise, "|" & word & "|") = 0 Then
+                tokens(count) = word
+                count = count + 1
+            End If
+        End If
+    Next idx
+End Sub
+
+' ============================================================
+' COUNT TOKEN OVERLAP
+' Returns how many tokens from array A appear in array B.
+' ============================================================
+Private Function CountTokenOverlap(aTokens() As String, aCount As Long, _
+                                   bTokens() As String, bCount As Long) As Long
+    Dim hits As Long
+    hits = 0
+    Dim ia As Long, ib As Long
+    For ia = 0 To aCount - 1
+        For ib = 0 To bCount - 1
+            If aTokens(ia) = bTokens(ib) Then
+                hits = hits + 1
+                Exit For
+            End If
+        Next ib
+    Next ia
+    CountTokenOverlap = hits
+End Function
+
+' ============================================================
+' BUILD SHARED TOKEN STRING  (for detail report)
+' Returns a comma-separated list of tokens shared between A and B.
+' ============================================================
+Private Function BuildSharedTokenString(aTokens() As String, aCount As Long, _
+                                         bTokens() As String, bCount As Long) As String
+    Dim result As String
+    result = ""
+    Dim ia As Long, ib As Long
+    For ia = 0 To aCount - 1
+        For ib = 0 To bCount - 1
+            If aTokens(ia) = bTokens(ib) Then
+                If result <> "" Then result = result & ", "
+                result = result & aTokens(ia)
+                Exit For
+            End If
+        Next ib
+    Next ia
+    If result = "" Then result = "(none)"
+    BuildSharedTokenString = result
+End Function
+
+' ============================================================
+' JOIN TOKENS  (for detail report)
+' Returns tokens as a comma-separated string.
+' ============================================================
+Private Function JoinTokens(tokens() As String, count As Long) As String
+    Dim result As String
+    result = ""
+    Dim i As Long
+    For i = 0 To count - 1
+        If result <> "" Then result = result & ", "
+        result = result & tokens(i)
+    Next i
+    If result = "" Then result = "(none)"
+    JoinTokens = result
+End Function
+
+' ============================================================
+' HELPER FUNCTIONS
+' ============================================================
+Private Function FindURLInDB(ws As Worksheet, sURL As String, lastRow As Long) As Long
+    Dim i As Long
+    Dim normInput As String
+    normInput = LCase(Trim(sURL))
+    If Right(normInput, 1) = "/" Then normInput = Left(normInput, Len(normInput) - 1)
+
+    Dim dbURL As String
+    For i = 2 To lastRow
+        dbURL = LCase(Trim(CStr(ws.Cells(i, COL_URL).Value)))
+        If Right(dbURL, 1) = "/" Then dbURL = Left(dbURL, Len(dbURL) - 1)
+        If dbURL = normInput Then
+            FindURLInDB = i: Exit Function
+        End If
+    Next i
+    FindURLInDB = -1
+End Function
+
+' ============================================================
+' ENSURE BLACKLIST SHEET (Updated with Clean Formatting)
+' ============================================================
+Private Sub EnsureBlacklistSheet(ByRef ws As Worksheet)
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(BLACKLIST_SHEET)
+    On Error GoTo 0
+
+    Dim isNewSheet As Boolean
+    isNewSheet = (ws Is Nothing)
+
+    If isNewSheet Then
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count))
+        ws.Name = BLACKLIST_SHEET
+    End If
+
+    ' Only write built-in phrases when sheet is truly new
+    If isNewSheet Or ws.Cells(1, 1).Value = "" Then
+        With ws
+            .Cells.Clear
+            .Range("A1").Value = "Custom Blacklist Phrase"
+            
+            ' --- NEW CLEANUP & SIZING ---
+            .Columns("A").ColumnWidth = 50
+            .Columns("A").VerticalAlignment = xlCenter
+            .Columns("A").HorizontalAlignment = xlLeft
+            .Rows(1).HorizontalAlignment = xlCenter
+
+            Dim builtInPhrases As Variant
+            builtInPhrases = Array("bin.sh", "malware", "exploit", "botnet", "ransom", _
+                                   "free-iphone", "free-gift", "claim-prize", "lucky-winner", _
+                                   "password-reset-required", "account-locked", "delivery-failed", _
+                                   "tax-refund", "paypal", "microsoft")
+
+            Dim r As Long
+            Dim item As Variant
+            r = 2
+            For Each item In builtInPhrases
+                .Cells(r, 1).Value = CStr(item)
+                r = r + 1
+            Next item
+        End With
+
+        ' Apply table formatting
+        On Error Resume Next
+        If ws.ListObjects.count = 0 Then
+            ws.ListObjects.Add(xlSrcRange, ws.UsedRange, , xlYes).Name = "tblBlacklist"
+            ws.ListObjects(1).TableStyle = "TableStyleMedium2"
+        End If
+        On Error GoTo 0
+    End If
+End Sub
+
+' ============================================================
+' LOG RESULT (Updated to Fix Row 3 Skip)
+' ============================================================
+Private Sub LogResult(sURL As String, sModel As String, dScore As Double, sClass As String, sAction As String)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("ScanLog")
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count))
+        ws.Name = "ScanLog"
+        ws.Range("A1:G1").Value = Array("Scan ID", "Date", "URL", "Model", "Score", "Class", "Action")
+        
+        ' Initialize table with an empty data row (Row 2)
+        ws.ListObjects.Add(xlSrcRange, ws.Range("A1:G2"), , xlYes).Name = "tblScanLog"
+        ws.ListObjects(1).TableStyle = "TableStyleMedium2"
+        
+        ' Clean up the header row
+        ws.Rows(1).RowHeight = 25
+        ws.Rows(1).VerticalAlignment = xlCenter
+        
+        ' Make the sheet visible
+        ws.Visible = xlSheetVisible
+    End If
+
+    Dim lastRow As Long
+    ' --- THE FIX: Check if Row 2 is completely empty first ---
+    If ws.Cells(2, 1).Value = "" Then
+        lastRow = 2
+    Else
+        lastRow = ws.Cells(ws.Rows.count, "A").End(xlUp).Row + 1
+    End If
+
+    With ws
+        .Cells(lastRow, 1).Value = lastRow - 1
+        .Cells(lastRow, 2).Value = Now()
+        .Cells(lastRow, 3).Value = sURL
+        .Cells(lastRow, 4).Value = sModel
+        .Cells(lastRow, 5).Value = dScore
+        .Cells(lastRow, 6).Value = sClass
+        .Cells(lastRow, 7).Value = sAction
+        
+        ' --- PRESERVE YOUR HIGHLIGHTS ---
+        Select Case sClass
+            Case "SAFE", "LEGIT (DB)"
+                .Cells(lastRow, 6).Interior.Color = RGB(198, 239, 206)
+                .Cells(lastRow, 6).Font.Color = RGB(0, 97, 0)
+            Case "SUSPICIOUS"
+                .Cells(lastRow, 6).Interior.Color = RGB(255, 235, 156)
+                .Cells(lastRow, 6).Font.Color = RGB(156, 87, 0)
+            Case "MALICIOUS", "PHISHING (DB)", "CRITICAL THREAT"
+                .Cells(lastRow, 6).Interior.Color = RGB(255, 199, 206)
+                .Cells(lastRow, 6).Font.Color = RGB(156, 0, 6)
+        End Select
+
+        ' --- NEW CLEANUP & SIZING ---
+        .Columns("A").ColumnWidth = 10 ' ID
+        .Columns("B").ColumnWidth = 18 ' Date
+        .Columns("C").ColumnWidth = 45 ' URL
+        .Columns("D").ColumnWidth = 20 ' Model
+        .Columns("E").ColumnWidth = 10 ' Score
+        .Columns("F").ColumnWidth = 18 ' Class
+        .Columns("G").ColumnWidth = 60 ' Action
+        
+        .Rows(lastRow).WrapText = True
+        
+        .Range(.Cells(lastRow, 1), .Cells(lastRow, 7)).VerticalAlignment = xlCenter
+        .Range(.Cells(lastRow, 1), .Cells(lastRow, 2)).HorizontalAlignment = xlCenter
+        .Cells(lastRow, 5).HorizontalAlignment = xlCenter ' Center Score
+        .Cells(lastRow, 6).HorizontalAlignment = xlCenter ' Center Class
+    Call UpdateDashboard
+    Call CreateDashboardChart
+    End With
+End Sub
+
+Private Function IsValidURL(sURL As String) As Boolean
+    Dim s As String
+    s = LCase(Trim(sURL))
+    IsValidURL = (Left(s, 7) = "http://" Or Left(s, 8) = "https://") And Len(s) > 10
+End Function
+
+Private Function ExtractHostname(sURL As String) As String
+    Dim s As String, p As Long
+    s = sURL
+    p = InStr(s, "://"): If p > 0 Then s = Mid(s, p + 3)
+    p = InStr(s, "/"): If p > 0 Then s = Left(s, p - 1)
+    p = InStr(s, ":"): If p > 0 Then s = Left(s, p - 1)
+    ExtractHostname = LCase(s)
+End Function
+
+Private Function IsIPAddress(sHost As String) As Boolean
+    Dim parts() As String, i As Integer
+    parts = Split(sHost, ".")
+    If UBound(parts) <> 3 Then IsIPAddress = False: Exit Function
+    For i = 0 To 3
+        If Not IsNumeric(parts(i)) Then IsIPAddress = False: Exit Function
+    Next i
+    IsIPAddress = True
+End Function
+
+Private Function CountSubDomains(sHost As String) As Integer
+    Dim parts() As String
+    parts = Split(sHost, ".")
+    CountSubDomains = IIf(UBound(parts) > 1, UBound(parts) - 1, 0)
+End Function
+
+Private Function DigitRatio(sHost As String) As Double
+    If Len(sHost) = 0 Then DigitRatio = 0: Exit Function
+    Dim i As Integer, d As Integer: d = 0
+    For i = 1 To Len(sHost)
+        If Mid(sHost, i, 1) >= "0" And Mid(sHost, i, 1) <= "9" Then d = d + 1
+    Next i
+    DigitRatio = d / Len(sHost)
+End Function
+
+Private Function GetTLD(sHost As String) As String
+    Dim parts() As String
+    parts = Split(sHost, ".")
+    If UBound(parts) >= 1 Then GetTLD = "." & parts(UBound(parts)) Else GetTLD = ""
+End Function
+
+Private Function ScoreVirusTotal(sURL As String, apiKey As String, ByRef sDetail As String) As Double
+    Dim http As Object
+    Dim json As Object
+    Dim id As String
+    Dim reportUrl As String
+    Dim status As String
+    Dim attempts As Integer
+    Dim malicious As Long, suspicious As Long
+    Dim score As Double
+    
+    ' 1. Use ServerXMLHTTP for better API reliability (ignores local cache)
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    
+    ' 2. Basic URL Encoding for x-www-form-urlencoded payload
+    ' (Prevents URLs with '&' or '+' from breaking the POST request)
+    Dim encodedURL As String
+    encodedURL = Replace(sURL, "%", "%25")
+    encodedURL = Replace(encodedURL, "&", "%26")
+    encodedURL = Replace(encodedURL, "=", "%3D")
+    encodedURL = Replace(encodedURL, "+", "%2B")
+    encodedURL = Replace(encodedURL, " ", "%20")
+    
+    On Error GoTo ErrorHandler
+    
+    ' -----------------------------
+    ' STEP 1: Submit URL
+    ' -----------------------------
+    http.Open "POST", "https://www.virustotal.com/api/v3/urls", False
+    http.setRequestHeader "x-apikey", apiKey
+    http.setRequestHeader "Content-Type", "application/x-www-form-urlencoded"
+    http.Send "url=" & encodedURL
+
+    If http.status <> 200 Then
+        sDetail = "VirusTotal API Error (Submit): " & http.status & " - " & http.responseText
+        ScoreVirusTotal = 0.3
+        Exit Function
+    End If
+
+    ' Parse JSON (Requires VBA-JSON)
+    Set json = JsonConverter.ParseJson(http.responseText)
+    id = json("data")("id")
+    reportUrl = "https://www.virustotal.com/api/v3/analyses/" & id
+
+    ' -----------------------------
+    ' STEP 2: WAIT FOR COMPLETION
+    ' -----------------------------
+    attempts = 0
+    Do
+        ' Prevent Excel UI from completely freezing during the wait
+        DoEvents
+        Application.Wait Now + TimeValue("0:00:02")
+
+        http.Open "GET", reportUrl, False
+        http.setRequestHeader "x-apikey", apiKey
+        http.Send
+
+        ' Check for errors during polling
+        If http.status <> 200 Then
+            sDetail = "VirusTotal API Error (Polling): " & http.status
+            ScoreVirusTotal = 0.3
+            Exit Function
+        End If
+
+        Set json = JsonConverter.ParseJson(http.responseText)
+        status = LCase(json("data")("attributes")("status"))
+
+        attempts = attempts + 1
+        ' Increased attempts to 8 (16 seconds) - VT queues can sometimes be slow
+        If attempts > 8 Then
+            sDetail = "VirusTotal Scan Timeout: Exceeded maximum polling attempts."
+            ScoreVirusTotal = 0.3
+            Exit Function
+        End If
+
+    Loop While status <> "completed"
+
+    ' -----------------------------
+    ' STEP 3: READ RESULTS
+    ' -----------------------------
+    ' Temporarily bypass errors in case 'stats' array is missing from response
+    On Error Resume Next
+    malicious = 0
+    suspicious = 0
+    malicious = CLng(json("data")("attributes")("stats")("malicious"))
+    suspicious = CLng(json("data")("attributes")("stats")("suspicious"))
+    On Error GoTo ErrorHandler ' Restore normal error handling
+
+    ' -----------------------------
+    ' STEP 4: SMART SCORING
+    ' -----------------------------
+    If malicious = 0 And suspicious = 0 Then
+        score = 0.35  ' UNKNOWN, not safe
+        sDetail = "VirusTotal Results:" & vbCrLf & _
+                  "No vendors flagged this URL yet." & vbCrLf & _
+                  "? This may be a NEW or UNREPORTED phishing site."
+    Else
+        score = (malicious * 0.15) + (suspicious * 0.08)
+        
+        sDetail = "VirusTotal Results:" & vbCrLf & _
+                  "Malicious detections: " & malicious & vbCrLf & _
+                  "Suspicious detections: " & suspicious
+    End If
+
+    ' Cap score at 1.0 (100%)
+    If score > 1 Then score = 1
+
+    ScoreVirusTotal = score
+    Exit Function
+
+ErrorHandler:
+    sDetail = "VBA Execution Error: " & Err.Description
+    ScoreVirusTotal = 0.3
+End Function
+

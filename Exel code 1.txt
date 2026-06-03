@@ -1,0 +1,414 @@
+Option Explicit
+
+Private Const BLACKLIST_SHEET As String = "Blacklist"
+
+' ---- Open the scanner form ---------------------------------
+Public Sub OpenURLScanner()
+    UserForm1.Show vbModeless
+End Sub
+
+' ---- ScanLog management ------------------------------------
+Public Sub ShowScanLog()
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("ScanLog")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        MsgBox "No scan log yet. Run a scan first.", vbInformation, "URL Threat Scanner"
+    Else
+        ws.Visible = xlSheetVisible
+        ws.Activate
+    End If
+End Sub
+
+Public Sub ClearScanLog()
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("ScanLog")
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub
+    If MsgBox("Permanently delete all scan history?", vbYesNo Or vbExclamation, _
+              "Clear Scan Log") = vbYes Then
+        ws.Visible = xlSheetVisible
+        ws.Rows("2:" & ws.Rows.count).Delete
+        ws.Visible = xlSheetVeryHidden
+        MsgBox "Scan log cleared.", vbInformation, "URL Threat Scanner"
+    End If
+End Sub
+
+' ---- Blacklist management ----------------------------------
+Public Sub ShowBlacklist()
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(BLACKLIST_SHEET)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        MsgBox "No blacklist sheet found. Open the scanner and click 'My Blacklist' to create it.", _
+               vbInformation, "Blacklist"
+        Exit Sub
+    End If
+    ws.Visible = xlSheetVisible
+    ws.Activate
+End Sub
+
+Public Sub ClearBlacklist()
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(BLACKLIST_SHEET)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        MsgBox "No blacklist found.", vbInformation, "Blacklist"
+        Exit Sub
+    End If
+    If MsgBox("This will delete all your custom blacklist phrases." & vbCrLf & _
+              "Are you sure?", vbYesNo Or vbExclamation, "Clear Blacklist") = vbYes Then
+        ws.Visible = xlSheetVisible
+        ws.Rows("2:" & ws.Rows.count).Delete
+        ws.Visible = xlSheetVeryHidden
+        MsgBox "Blacklist cleared.", vbInformation, "Blacklist"
+    End If
+End Sub
+
+Public Sub UpdateDashboard()
+    Dim wsLog As Worksheet
+    Dim wsDash As Worksheet
+    
+    Set wsLog = ThisWorkbook.Sheets("ScanLog")
+    Set wsDash = ThisWorkbook.Sheets("Dashboard")
+    
+    Dim lastRow As Long
+    lastRow = wsLog.Cells(wsLog.Rows.count, "A").End(xlUp).Row
+    
+    Dim safeCount As Long, suspiciousCount As Long
+    Dim maliciousCount As Long
+    
+    Dim i As Long
+    For i = 2 To lastRow
+        Select Case UCase(wsLog.Cells(i, 6).Value)
+            Case "SAFE", "LEGIT (DB)"
+                safeCount = safeCount + 1
+            Case "SUSPICIOUS"
+                suspiciousCount = suspiciousCount + 1
+            Case Else
+                maliciousCount = maliciousCount + 1
+        End Select
+    Next i
+    
+    ' Write to dashboard with improved formatting
+    With wsDash
+        ' Title formatting
+        .Range("A1").Value = "Scan Summary"
+        .Range("A1:B1").Merge
+        .Range("A1").Font.Bold = True
+        .Range("A1").Font.Size = 14
+        .Range("A1").HorizontalAlignment = xlCenter
+        
+        ' Table Headers
+        .Range("A2").Value = "Status"
+        .Range("B2").Value = "Count"
+        .Range("A2:B2").Font.Bold = True
+        .Range("A2:B2").Borders(xlEdgeBottom).LineStyle = xlContinuous
+        
+        ' Data Rows
+        .Range("A3").Value = "Safe"
+        .Range("B3").Value = safeCount
+        
+        .Range("A4").Value = "Suspicious"
+        .Range("B4").Value = suspiciousCount
+        
+        .Range("A5").Value = "Malicious"
+        .Range("B5").Value = maliciousCount
+        .Range("A5:B5").Font.Color = vbRed ' Highlight the Malicious row in red
+        .Range("A5:B5").Font.Bold = True
+        
+        ' Add borders to the summary table
+        .Range("A2:B5").Borders.LineStyle = xlContinuous
+        
+        Dim totalScore As Double
+        For i = 2 To lastRow
+            totalScore = totalScore + wsLog.Cells(i, 5).Value
+        Next i
+    
+        If lastRow > 2 Then
+            .Range("A7").Value = "Average Risk Score"
+            .Range("B7").Value = totalScore / (lastRow - 1)
+            .Range("A7:B7").Font.Bold = True
+            .Range("B7").NumberFormat = "0.00" ' Format average to 2 decimal places
+        End If
+        
+        ' AutoFit columns for a clean look
+        .Columns("A:B").AutoFit
+    End With
+End Sub
+
+Public Sub CreateDashboardChart()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("Dashboard")
+
+    Dim chartObj As ChartObject
+    
+    ' Delete old chart to prevent stacking
+    For Each chartObj In ws.ChartObjects
+        chartObj.Delete
+    Next chartObj
+
+    ' Position the chart nicely next to the table
+    Set chartObj = ws.ChartObjects.Add(Left:=150, Width:=350, Top:=20, Height:=250)
+
+    With chartObj.Chart
+        .SetSourceData Source:=ws.Range("A3:B5")
+        ' Consider xlDoughnut if you want a modern ring style instead of a flat pie
+        .ChartType = xlPie
+        .HasTitle = True
+        .ChartTitle.Text = "Threat Distribution"
+        .ChartTitle.Font.Bold = True
+        .ChartTitle.Font.Size = 14
+        
+        ' Apply custom colors and labels to the series
+        If .SeriesCollection.count > 0 Then
+            Dim srs As Series
+            Set srs = .SeriesCollection(1)
+            
+            ' Add Category Name and Percentage to the slices
+            srs.ApplyDataLabels Type:=xlDataLabelsShowLabelAndPercent
+            
+            ' Wait for labels to generate, then format them
+            DoEvents
+            srs.DataLabels.Font.Bold = True
+            srs.DataLabels.Font.Color = RGB(255, 255, 255) ' White text
+            
+            ' Point 1 is Safe (Row 3) -> Green
+            srs.Points(1).Format.Fill.ForeColor.RGB = RGB(40, 167, 69)
+            
+            ' Point 2 is Suspicious (Row 4) -> Orange
+            srs.Points(2).Format.Fill.ForeColor.RGB = RGB(255, 193, 7)
+            
+            ' Point 3 is Malicious (Row 5) -> Red
+            srs.Points(3).Format.Fill.ForeColor.RGB = RGB(220, 53, 69)
+        End If
+        
+        ' Remove the chart border and legend for a cleaner, modern look
+        .ChartArea.Format.line.Visible = msoFalse
+        .HasLegend = False
+    End With
+End Sub
+
+Public Sub DeleteDashboard()
+    ' Turn off Excel's deletion warning prompts
+    Application.DisplayAlerts = False
+    
+    ' Delete the dashboard if it exists
+    On Error Resume Next
+    ThisWorkbook.Sheets("Dashboard").Delete
+    On Error GoTo 0 ' Restore normal error handling
+    
+    ' Turn warning prompts back on
+    Application.DisplayAlerts = True
+End Sub
+
+Public Sub MakeNewDashboard()
+    Dim ws As Worksheet
+    
+    ' Create a fresh sheet at the end of the workbook
+    Set ws = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count))
+    ws.Name = "Dashboard"
+    
+    ' Clean up the view by selecting the top-left cell
+    ws.Activate
+    ws.Range("A1").Select
+End Sub
+
+Sub CreateHTTPSChart()
+    Dim ws As Worksheet
+    Dim chartObj As ChartObject
+    Dim lastRow As Long
+    Dim httpsCount As Long
+    Dim httpCount As Long
+    
+    Set ws = ActiveSheet
+    lastRow = ws.Cells(ws.Rows.count, "C").End(xlUp).Row
+    
+    ' Count HTTPS (1) and HTTP (0) in column C
+    httpsCount = WorksheetFunction.CountIf(ws.Range("C2:C" & lastRow), 1)
+    httpCount = WorksheetFunction.CountIf(ws.Range("C2:C" & lastRow), 0)
+    
+    ' Create chart on the sheet
+    Set chartObj = ws.ChartObjects.Add(Left:=200, Top:=400, Width:=400, Height:=300)
+    
+    With chartObj.Chart
+        .ChartType = xlPie
+        .HasTitle = True
+        .ChartTitle.Text = "HTTPS vs HTTP URLs"
+        
+        ' Manually add series data (no temp sheet needed)
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).values = Array(httpsCount, httpCount)
+        .SeriesCollection(1).XValues = Array("HTTPS", "HTTP")
+        
+        ' Add percentage labels
+        .SeriesCollection(1).ApplyDataLabels
+        .SeriesCollection(1).DataLabels.ShowPercentage = True
+        .SeriesCollection(1).DataLabels.ShowValue = True
+        .SeriesCollection(1).DataLabels.ShowCategoryName = True
+        
+        ' Color: green for HTTPS (secure), red for HTTP (insecure)
+        .SeriesCollection(1).Points(1).Interior.Color = RGB(60, 180, 60)
+        .SeriesCollection(1).Points(2).Interior.Color = RGB(255, 60, 60)
+    End With
+    
+    MsgBox "Chart created! HTTPS: " & httpsCount & " | HTTP: " & httpCount
+End Sub
+
+Sub CreatePhishingChart()
+    Dim ws As Worksheet
+    Dim chartObj As ChartObject
+    Dim lastRow As Long
+    Dim phishCount As Long
+    Dim safeCount As Long
+    
+    Set ws = ActiveSheet
+    lastRow = ws.Cells(ws.Rows.count, "D").End(xlUp).Row
+    
+    ' Count phishing (1) and safe (0) in column D
+    phishCount = WorksheetFunction.CountIf(ws.Range("D2:D" & lastRow), 1)
+    safeCount = WorksheetFunction.CountIf(ws.Range("D2:D" & lastRow), 0)
+    
+    ' Create chart on the sheet
+    Set chartObj = ws.ChartObjects.Add(Left:=200, Top:=50, Width:=400, Height:=300)
+    
+    With chartObj.Chart
+        .ChartType = xlPie
+        .HasTitle = True
+        .ChartTitle.Text = "Phishing vs Safe Emails"
+        
+        ' Manually add series data (no temp sheet needed)
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).values = Array(phishCount, safeCount)
+        .SeriesCollection(1).XValues = Array("Phishing", "Safe")
+        
+        ' Add percentage labels
+        .SeriesCollection(1).ApplyDataLabels
+        .SeriesCollection(1).DataLabels.ShowPercentage = True
+        .SeriesCollection(1).DataLabels.ShowValue = True
+        .SeriesCollection(1).DataLabels.ShowCategoryName = True
+        
+        ' Color: red for phishing, green for safe
+        .SeriesCollection(1).Points(1).Interior.Color = RGB(255, 60, 60)
+        .SeriesCollection(1).Points(2).Interior.Color = RGB(60, 180, 60)
+    End With
+    
+    MsgBox "Chart created! Phishing: " & phishCount & " | Safe: " & safeCount
+End Sub
+
+Sub CreateDomainChart()
+    Dim ws As Worksheet
+    Dim chartObj As ChartObject
+    Dim lastRow As Long
+    Dim cell As Range
+    Dim labels() As Variant
+    Dim values() As Variant
+    Dim count As Integer
+    Dim found As Boolean
+    Dim i As Integer
+    Dim ext As String
+    Dim parts() As String
+    Dim finalLabels() As Variant
+    Dim finalValues() As Variant
+    Dim otherCount As Long
+    Dim finalCount As Integer
+    Dim total As Long
+    Dim threshold As Double
+    
+    Set ws = ActiveSheet
+    lastRow = ws.Cells(ws.Rows.count, "B").End(xlUp).Row
+    
+    count = 0
+    ReDim labels(0)
+    ReDim values(0)
+    
+    ' Loop through column B starting at B2 to skip header
+    For Each cell In ws.Range("B2:B" & lastRow)
+        If cell.Value <> "" Then
+            parts = Split(cell.Value, ".")
+            ext = "." & parts(UBound(parts))
+            
+            found = False
+            For i = 0 To count - 1
+                If labels(i) = ext Then
+                    values(i) = values(i) + 1
+                    found = True
+                    Exit For
+                End If
+            Next i
+            If Not found Then
+                ReDim Preserve labels(0 To count)
+                ReDim Preserve values(0 To count)
+                labels(count) = ext
+                values(count) = 1
+                count = count + 1
+            End If
+        End If
+    Next cell
+    
+    ' Calculate total for threshold
+    total = 0
+    For i = 0 To count - 1
+        total = total + values(i)
+    Next i
+    
+    ' Only show slices that are more than 2% of total, group rest as "Other"
+    threshold = total * 0.02
+    otherCount = 0
+    finalCount = 0
+    ReDim finalLabels(0)
+    ReDim finalValues(0)
+    
+    For i = 0 To count - 1
+        If values(i) >= threshold Then
+            ReDim Preserve finalLabels(0 To finalCount)
+            ReDim Preserve finalValues(0 To finalCount)
+            finalLabels(finalCount) = labels(i)
+            finalValues(finalCount) = values(i)
+            finalCount = finalCount + 1
+        Else
+            otherCount = otherCount + values(i)
+        End If
+    Next i
+    
+    ' Add "Other" slice if needed
+    If otherCount > 0 Then
+        ReDim Preserve finalLabels(0 To finalCount)
+        ReDim Preserve finalValues(0 To finalCount)
+        finalLabels(finalCount) = "Other"
+        finalValues(finalCount) = otherCount
+        finalCount = finalCount + 1
+    End If
+    
+    ' Create chart
+    Set chartObj = ws.ChartObjects.Add(Left:=200, Top:=750, Width:=550, Height:=450)
+    
+    With chartObj.Chart
+        .ChartType = xlPie
+        .HasTitle = True
+        .ChartTitle.Text = "Domain Extension Breakdown"
+        
+        .SeriesCollection.NewSeries
+        .SeriesCollection(1).values = finalValues
+        .SeriesCollection(1).XValues = finalLabels
+        .SeriesCollection(1).Name = "Count"
+        
+        ' Clean labels
+        .SeriesCollection(1).ApplyDataLabels
+        .SeriesCollection(1).DataLabels.ShowPercentage = True
+        .SeriesCollection(1).DataLabels.ShowCategoryName = True
+        .SeriesCollection(1).DataLabels.ShowValue = False
+        .SeriesCollection(1).DataLabels.Position = xlLabelPositionBestFit
+        
+        ' Legend at the right
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionRight
+        
+    End With
+    
+    MsgBox "Chart created! Showing " & finalCount - 1 & " extensions + Other."
+End Sub
